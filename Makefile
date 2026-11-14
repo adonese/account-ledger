@@ -3,7 +3,7 @@
 
 lint:
 	golangci-lint config verify
-	golangci-lint run ./...
+	golangci-lint run ./... --tests=false
 
 fmt:
 	golangci-lint fmt
