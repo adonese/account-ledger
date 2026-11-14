@@ -51,9 +51,9 @@ func (l *Ledger) Apply(event Event) error {
 	case !event.BookedDay.inWindow():
 		err = fmt.Errorf("Ledger.Apply: %w booked day %d is outside the window", ErrInvalid, event.BookedDay)
 	default:
-		// advance the processing day without closing days
-		if event.BookedDay > l.today {
-			l.today = event.BookedDay
+		// close proceeding days before processing the event.
+		for l.today < event.BookedDay {
+			l.closeDay()
 		}
 		effects, err = l.plan(event)
 	}
@@ -103,4 +103,15 @@ func (l *Ledger) plan(event Event) ([]Record, error) {
 		return nil, fmt.Errorf("Ledger.plan: %w unsupported event kind %q", ErrInvalid, event.Kind)
 	}
 
+}
+
+func (l *Ledger) closeDay() {
+	l.append(Record{Kind: DayClosed, ValueDay: l.today})
+	l.today++
+}
+
+func (l *Ledger) Close() {
+	for l.today <= LastDay {
+		l.closeDay()
+	}
 }

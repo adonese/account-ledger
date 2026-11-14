@@ -42,3 +42,20 @@ func (v View) input(eventID string) (Record, bool) {
 	}
 	return Record{}, false
 }
+
+func (v View) AtClose(day Day) View {
+	for _, record := range v.journal {
+		if record.Kind == DayClosed && record.ValueDay == day {
+			return View{
+				accounts: v.accounts, journal: v.journal[:record.Seq],
+			}
+		}
+	}
+	return v
+}
+
+func (v View) Before(seq int) View {
+	return View{
+		accounts: v.accounts, journal: v.journal[:seq-1],
+	}
+}
