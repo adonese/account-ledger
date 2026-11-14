@@ -69,3 +69,19 @@ func (m Money) split(n int) []Money {
 
 	return parts
 }
+
+// 0.04% = 1/2500. Work entirely in integer minor units.
+const interestDivisor = 2500
+
+func dailyInterest(balance Money) Money {
+	interest := Money{Currency: balance.Currency}
+
+	if balance.Minor > 0 {
+		interest.Minor = balance.Minor / interestDivisor
+		if balance.Minor%interestDivisor >= interestDivisor/2 {
+			interest.Minor++
+		}
+	}
+
+	return interest
+}

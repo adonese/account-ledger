@@ -20,7 +20,7 @@ func (v View) Balance(accountID string, day Day) Money {
 	balance := account.Opening
 
 	for _, record := range v.journal {
-		if (record.Kind == Posting || record.Kind == Fee) &&
+		if (record.Kind == Posting || record.Kind == Fee || record.Kind == Interest) &&
 			record.AccountID == accountID && record.ValueDay <= day {
 			balance = balance.Add(record.Amount)
 		}
@@ -110,6 +110,21 @@ func (v View) Fee(accountID string, day Day) Money {
 	}
 
 	return total.Neg()
+}
+
+// Accrued returns the current entitlement for one day, including adjustments.
+func (v View) Accrued(accountID string, day Day) Money {
+	account, _ := v.account(accountID)
+	total := Money{Currency: account.Opening.Currency}
+
+	for _, record := range v.journal {
+		if record.Kind == Accrual &&
+			record.AccountID == accountID && record.ValueDay == day {
+			total = total.Add(record.Amount)
+		}
+	}
+
+	return total
 }
 
 func (v View) auth(accountID, authID string) (Auth, bool) {

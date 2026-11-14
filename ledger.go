@@ -139,6 +139,10 @@ func (l *Ledger) closeDay() {
 		l.assess(account, l.today, "")
 	}
 
+	if l.today == LastDay {
+		l.capitalize()
+	}
+
 	l.append(Record{Kind: DayClosed, ValueDay: l.today})
 	l.today++
 }
@@ -159,12 +163,35 @@ func (l *Ledger) assess(account Account, day Day, eventID string) {
 
 	if priced && balance.Minor < 0 && l.Fee(account.ID, day).Minor == 0 {
 		l.append(Record{
-			Kind:      Fee,
-			EventID:   eventID,
-			AccountID: account.ID,
-			ValueDay:  day,
-			Amount:    fee.Neg(),
+			Kind: Fee, EventID: eventID, AccountID: account.ID,
+			ValueDay: day, Amount: fee.Neg(),
 		})
+		balance = balance.Add(fee.Neg())
+	}
+
+	change := dailyInterest(balance).Add(l.Accrued(account.ID, day).Neg())
+	if change.Minor != 0 {
+		l.append(Record{
+			Kind: Accrual, EventID: eventID, AccountID: account.ID,
+			ValueDay: day, Amount: change,
+		})
+	}
+}
+
+func (l *Ledger) capitalize() {
+	for _, account := range l.accounts {
+		total := Money{Currency: account.Opening.Currency}
+
+		for day := FirstDay; day <= LastDay; day++ {
+			total = total.Add(l.Accrued(account.ID, day))
+		}
+
+		if total.Minor > 0 {
+			l.append(Record{
+				Kind: Interest, AccountID: account.ID,
+				ValueDay: LastDay, Amount: total,
+			})
+		}
 	}
 }
 
