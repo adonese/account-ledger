@@ -503,3 +503,171 @@ func TestSettlementCannotReleaseAnotherAccountsHold(t *testing.T) {
 		t.Fatalf("settlement matched another account's authorization: %+v", auths)
 	}
 }
+
+func TestReversalAppendsCompensationOnOriginalValueDay(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		kind         ledger.EventKind
+		original     ledger.Money
+		compensation ledger.Money
+	}{
+		{"credit", ledger.Credit, aed(120_00), aed(-20_00)},
+		{"debit", ledger.Debit, aed(80_00), aed(20_00)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newTestLedger(t)
+			applyEvents(t, l,
+				accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+				accountEvent("target", 1, tc.kind, aed(20_00)),
+				accountEvent("later-credit", 3, ledger.Credit, aed(1_00)),
+			)
+			before := l.Journal()
+
+			reversal := ledger.Event{
+				ID: "refund", BookedDay: 3, ValueDay: 1,
+				Kind: ledger.Reversal, AccountID: "ACC-001",
+				Reverses: "target",
+			}
+			applyEvents(t, l, reversal)
+
+			if l.Balance("ACC-001", 1) != aed(100_00) ||
+				l.Balance("ACC-001", 3) != aed(101_00) {
+				t.Fatal("principal was not restored on its original value day")
+			}
+			if got := l.AtClose(1).Balance("ACC-001", 1); got != tc.original {
+				t.Fatalf("original close = %v, want %v", got, tc.original)
+			}
+
+			after := l.Journal()
+			if !reflect.DeepEqual(after[:len(before)], before) {
+				t.Fatal("reversal rewrote earlier records")
+			}
+			added := after[len(before):]
+			if len(added) != 2 || added[0].Kind != ledger.Input ||
+				added[0].Event != reversal {
+				t.Fatalf("reversal records = %+v", added)
+			}
+
+			posting := added[1]
+			if posting.Kind != ledger.Posting || posting.Amount != tc.compensation ||
+				posting.ValueDay != 1 || posting.Day != 3 ||
+				posting.EventID != reversal.ID || posting.AccountID != "ACC-001" {
+				t.Fatalf("compensation = %+v", posting)
+			}
+
+			reversal.ID = "second-refund"
+			if err := l.Apply(reversal); !errors.Is(err, ledger.ErrReversal) {
+				t.Fatalf("duplicate reversal error = %v", err)
+			}
+			if l.Balance("ACC-001", 3) != aed(101_00) {
+				t.Fatal("duplicate reversal moved money")
+			}
+		})
+	}
+}
+
+func TestReversalRejectsInvalidTargetsAndAllowsRetry(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+		accountEvent("purchase", 1, ledger.Debit, aed(20_00)),
+	)
+
+	hold := accountEvent("reserve", 1, ledger.Authorization, aed(10_00))
+	hold.AuthID = "active"
+	applyEvents(t, l, hold)
+
+	declined := accountEvent("declined", 1, ledger.Authorization, aed(200_00))
+	declined.AuthID = "declined"
+	if err := l.Apply(declined); !errors.Is(err, ledger.ErrDeclined) {
+		t.Fatalf("authorization error = %v", err)
+	}
+
+	applyEvents(t, l, ledger.Event{
+		ID: "first-refund", BookedDay: 2, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-001",
+		Reverses: "purchase",
+	})
+	authsBefore := l.Auths("ACC-001")
+
+	for _, tc := range []struct {
+		name    string
+		target  string
+		account string
+		day     ledger.Day
+		amount  ledger.Money
+	}{
+		{"missing target", "missing", "ACC-001", 1, ledger.Money{}},
+		{"rejected target", "declined", "ACC-001", 1, ledger.Money{}},
+		{"active hold", "reserve", "ACC-001", 1, ledger.Money{}},
+		{"other account", "fund", "ACC-002", 1, ledger.Money{}},
+		{"wrong value day", "fund", "ACC-001", 2, ledger.Money{}},
+		{"nonzero amount", "fund", "ACC-001", 1, aed(1)},
+		{"negative amount", "fund", "ACC-001", 1, aed(-1)},
+		{"already reversed", "purchase", "ACC-001", 1, ledger.Money{}},
+		{"reversal target", "first-refund", "ACC-001", 1, ledger.Money{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := ledger.Event{
+				ID: tc.name, BookedDay: 2, ValueDay: tc.day,
+				Kind: ledger.Reversal, AccountID: tc.account,
+				Reverses: tc.target, Amount: tc.amount,
+			}
+			before := len(l.Journal())
+
+			if err := l.Apply(event); !errors.Is(err, ledger.ErrReversal) {
+				t.Fatalf("error = %v", err)
+			}
+			added := l.Journal()[before:]
+			if len(added) != 1 || added[0].Kind != ledger.Input ||
+				added[0].Event != event || added[0].Rejected == "" {
+				t.Fatalf("rejection records = %+v", added)
+			}
+
+			if l.Balance("ACC-001", 2) != aed(100_00) ||
+				l.Balance("ACC-002", 2) != bhd(0) ||
+				!reflect.DeepEqual(l.Auths("ACC-001"), authsBefore) {
+				t.Fatal("invalid reversal changed financial state")
+			}
+		})
+	}
+
+	// Failed attempts must not mark the fund event as already reversed.
+	applyEvents(t, l, ledger.Event{
+		ID: "valid-retry", BookedDay: 2, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-001",
+		Reverses: "fund",
+	})
+	if l.Balance("ACC-001", 2) != aed(0) {
+		t.Fatal("valid retry did not reverse the credit")
+	}
+}
+
+func TestSettlementReversalDoesNotReopenTheHold(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+	)
+
+	hold := accountEvent("reserve", 1, ledger.Authorization, aed(20_00))
+	hold.AuthID = "purchase"
+	settlement := accountEvent("capture", 1, ledger.Settlement, aed(15_00))
+	settlement.AuthID = hold.AuthID
+	applyEvents(t, l, hold, settlement)
+	before := l.Auths("ACC-001")
+
+	applyEvents(t, l, ledger.Event{
+		ID: "refund", BookedDay: 1, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-001",
+		Reverses: settlement.ID,
+	})
+
+	if l.Balance("ACC-001", 1) != aed(100_00) ||
+		l.Holds("ACC-001") != aed(0) ||
+		l.Available("ACC-001", 1) != aed(100_00) {
+		t.Fatal("settlement reversal has wrong financial effect")
+	}
+	if got := l.Auths("ACC-001"); !reflect.DeepEqual(got, before) {
+		t.Fatalf("settlement reversal changed authorization history: %+v", got)
+	}
+}

@@ -3,6 +3,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 var (
@@ -89,12 +90,16 @@ func (l *Ledger) plan(event Event) ([]Record, error) {
 			"Ledger.plan: %w: value day %d must be within the window and not after booked day %d",
 			ErrInvalid, event.ValueDay, event.BookedDay,
 		)
+	case event.Kind == Reversal:
+		// original event suppliest amount and currency
 	case event.Amount.Currency != account.Opening.Currency:
 		return nil, fmt.Errorf("Ledger.plan: %w: recieved %s for a %s account", ErrCurrency, event.Amount.Currency, account.Opening.Currency)
 	case event.Amount.Minor <= 0:
 		return nil, fmt.Errorf("Ledger.plan: %w: amount must be positive", ErrInvalid)
 	}
 	switch event.Kind {
+	case Reversal:
+		return l.reverse(event)
 	case Settlement:
 		return l.settle(event)
 	case Authorization:
@@ -155,4 +160,43 @@ func (l *Ledger) settle(event Event) ([]Record, error) {
 		posting(event, event.Amount.Neg()),
 		{Kind: AuthState, Auth: settled},
 	}, nil
+}
+
+func (l *Ledger) reverse(event Event) ([]Record, error) {
+	target, found := l.input(event.Reverses)
+
+	reversed := slices.ContainsFunc(l.journal, func(record Record) bool {
+		return record.Kind == Input && record.Rejected == "" &&
+			record.Event.Kind == Reversal &&
+			record.Event.Reverses == event.Reverses
+	})
+
+	switch {
+	case !found || target.Rejected != "" || target.AccountID != event.AccountID:
+		return nil, fmt.Errorf(
+			"%w: %q is not an accepted event on this account",
+			ErrReversal, event.Reverses,
+		)
+	case reversed:
+		return nil, fmt.Errorf(
+			"%w: %q is already reversed", ErrReversal, event.Reverses,
+		)
+	case event.ValueDay != target.Event.ValueDay || event.Amount.Minor != 0:
+		return nil, fmt.Errorf(
+			"%w: reverse the whole amount on the original value day",
+			ErrReversal,
+		)
+	}
+
+	switch target.Event.Kind {
+	case Credit:
+		return []Record{posting(event, target.Event.Amount.Neg())}, nil
+	case Debit, Settlement:
+		return []Record{posting(event, target.Event.Amount)}, nil
+	default:
+		return nil, fmt.Errorf(
+			"%w: %q is not a credit, debit, or settlement",
+			ErrReversal, event.Reverses,
+		)
+	}
 }
