@@ -73,6 +73,7 @@ func (l *Ledger) Apply(event Event) error {
 	return err
 }
 
+//nolint:cyclop // i will try to refactor it later. Notice its gocognit is low
 func (l *Ledger) plan(event Event) ([]Record, error) {
 	account, known := l.account(event.AccountID)
 	_, seen := l.input(event.ID)

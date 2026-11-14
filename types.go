@@ -39,7 +39,7 @@ type Account struct {
 type AuthStatus string
 
 const (
-	Active   AuthStatus = "ACTIVE" //approved
+	Active   AuthStatus = "ACTIVE"
 	Declined AuthStatus = "DECLINED"
 	Settled  AuthStatus = "SETTLED"
 )
@@ -72,7 +72,7 @@ type Record struct {
 	AccountID string
 	Event     Event  // Input: the event exactly as received
 	Rejected  string // why it was rejected. empty if accepted
-	ValueDay  Day    //identifies the accounting day
+	ValueDay  Day    // identifies the accounting day
 	Amount    Money  // signed change represented by this record
 	Auth      Auth
 }
