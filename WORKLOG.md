@@ -9,3 +9,6 @@ So so far it was just setting up the repo with golang (1.27) and adding golanci 
 - instalments part: there will be leftovers because 1000 is not divisable by 3
 
 We currently are at ledger and journal part. Nothing big, basically having views over the journal and added tests
+
+- added golangci lint and created a an entry for it in Makefile. I had to fix reported bugs as well
+- I prefer having method names in the error logs so i had to skip ST1005 
