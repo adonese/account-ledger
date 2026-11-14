@@ -206,3 +206,300 @@ func TestCloseIsIdempotentAndRejectsLaterEvents(t *testing.T) {
 		t.Fatal("closed ledger accepted money")
 	}
 }
+
+func TestAuthorizationReservesAvailabilityWithoutMovingMoney(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l, accountEvent("fund", 1, ledger.Credit, aed(250_00)))
+
+	hold := accountEvent("reserve", 2, ledger.Authorization, aed(200_00))
+	hold.AuthID = "purchase-a"
+	applyEvents(t, l, hold)
+
+	if got := l.Balance("ACC-001", 2); got != aed(250_00) {
+		t.Fatalf("balance = %v", got)
+	}
+	if got := l.Holds("ACC-001"); got != aed(200_00) {
+		t.Fatalf("holds = %v", got)
+	}
+	if got := l.Available("ACC-001", 2); got != aed(50_00) {
+		t.Fatalf("available = %v", got)
+	}
+
+	// A value-day query alone does not rewind authorization knowledge.
+	if got := l.Available("ACC-001", 1); got != aed(50_00) {
+		t.Fatalf("current view of Day 1 = %v", got)
+	}
+	if got := l.AtClose(1).Available("ACC-001", 1); got != aed(250_00) {
+		t.Fatalf("original Day 1 close = %v", got)
+	}
+
+	auths := l.Auths("ACC-001")
+	if len(auths) != 1 || auths[0].Status != ledger.Active {
+		t.Fatalf("authorizations = %+v", auths)
+	}
+
+	auths[0].Status = ledger.Settled
+	auths[0].Hold.Minor = 1
+	if l.Holds("ACC-001") != aed(200_00) {
+		t.Fatal("editing query results changed the stored hold")
+	}
+}
+
+func TestAuthorizationAllowsExactlyZeroAndKeepsDeclines(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l, accountEvent("fund", 1, ledger.Credit, aed(100_00)))
+
+	exact := accountEvent("reserve-all", 1, ledger.Authorization, aed(100_00))
+	exact.AuthID = "purchase-a"
+	applyEvents(t, l, exact)
+
+	if got := l.Available("ACC-001", 1); got != aed(0) {
+		t.Fatalf("remaining available = %v", got)
+	}
+
+	// One minor unit beyond the available amount must be declined.
+	over := accountEvent("reserve-more", 1, ledger.Authorization, aed(1))
+	over.AuthID = "purchase-b"
+
+	before := len(l.Journal())
+	if err := l.Apply(over); !errors.Is(err, ledger.ErrDeclined) {
+		t.Fatalf("decline error = %v", err)
+	}
+
+	added := l.Journal()[before:]
+	if len(added) != 2 || added[0].Kind != ledger.Input ||
+		added[0].Rejected == "" || added[1].Kind != ledger.AuthState ||
+		added[1].Auth.Status != ledger.Declined {
+		t.Fatalf("decline records = %+v", added)
+	}
+
+	// Later funds must not change the earlier decision.
+	applyEvents(t, l, accountEvent("later-funds", 1, ledger.Credit, aed(10_00)))
+
+	want := []ledger.Auth{
+		{ID: "purchase-a", Status: ledger.Active, Hold: aed(100_00)},
+		{ID: "purchase-b", Status: ledger.Declined, Hold: aed(1)},
+	}
+	if got := l.Auths("ACC-001"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("authorizations = %+v, want %+v", got, want)
+	}
+
+	if l.Balance("ACC-001", 1) != aed(110_00) ||
+		l.Holds("ACC-001") != aed(100_00) ||
+		l.Available("ACC-001", 1) != aed(10_00) {
+		t.Fatal("decline changed money or reserved funds")
+	}
+}
+
+func TestAuthorizationRequiresUniqueIDWithinAccount(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l, accountEvent("fund", 1, ledger.Credit, aed(100_00)))
+
+	first := accountEvent("reserve-first", 1, ledger.Authorization, aed(10_00))
+	first.AuthID = "purchase-a"
+	applyEvents(t, l, first)
+	before := l.Auths("ACC-001")
+
+	for _, tc := range []struct {
+		name   string
+		authID string
+		want   error
+	}{
+		{"missing", "", ledger.ErrInvalid},
+		{"duplicate", "purchase-a", ledger.ErrDuplicate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Fresh event IDs ensure we test AuthID validation.
+			event := accountEvent(tc.name, 1, ledger.Authorization, aed(1))
+			event.AuthID = tc.authID
+
+			if err := l.Apply(event); !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			if got := l.Auths("ACC-001"); !reflect.DeepEqual(got, before) {
+				t.Fatalf("rejection changed authorizations: %+v", got)
+			}
+		})
+	}
+}
+
+func TestAuthorizationIDsAreScopedToAccount(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l, accountEvent("fund-aed", 1, ledger.Credit, aed(100_00)))
+
+	fund := accountEvent("fund-bhd", 1, ledger.Credit, bhd(20_000))
+	fund.AccountID = "ACC-002"
+	applyEvents(t, l, fund)
+
+	first := accountEvent("hold-aed", 1, ledger.Authorization, aed(10_00))
+	first.AuthID = "shared-id"
+
+	second := accountEvent("hold-bhd", 1, ledger.Authorization, bhd(5_000))
+	second.AccountID, second.AuthID = "ACC-002", "shared-id"
+	applyEvents(t, l, first, second)
+
+	if l.Holds("ACC-001") != aed(10_00) ||
+		l.Holds("ACC-002") != bhd(5_000) {
+		t.Fatal("holds leaked across accounts")
+	}
+	if l.Available("ACC-001", 1) != aed(90_00) ||
+		l.Available("ACC-002", 1) != bhd(15_000) {
+		t.Fatal("wrong available balance or currency")
+	}
+}
+
+func TestSettlementReleasesWholeHoldAndRejectsDuplicates(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		paid    ledger.Money
+		balance ledger.Money
+	}{
+		{"less than hold", aed(185_00), aed(315_00)},
+		{"equal to hold", aed(200_00), aed(300_00)},
+		{"exceeds hold and funds", aed(600_00), aed(-100_00)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newTestLedger(t)
+			applyEvents(t, l,
+				accountEvent("fund", 1, ledger.Credit, aed(500_00)),
+			)
+
+			hold := accountEvent("reserve", 1, ledger.Authorization, aed(200_00))
+			hold.AuthID = "purchase-a"
+			applyEvents(t, l, hold)
+			before := l.Journal()
+
+			event := accountEvent("capture", 1, ledger.Settlement, tc.paid)
+			event.AuthID = hold.AuthID
+			applyEvents(t, l, event)
+
+			if got := l.Balance("ACC-001", 1); got != tc.balance {
+				t.Fatalf("balance = %v, want %v", got, tc.balance)
+			}
+			if l.Holds("ACC-001") != aed(0) ||
+				l.Available("ACC-001", 1) != tc.balance {
+				t.Fatal("settlement did not release the whole hold")
+			}
+
+			want := []ledger.Auth{{
+				ID:     hold.AuthID,
+				Status: ledger.Settled,
+				Hold:   aed(200_00),
+				Paid:   tc.paid,
+			}}
+			if got := l.Auths("ACC-001"); !reflect.DeepEqual(got, want) {
+				t.Fatalf("authorization = %+v, want %+v", got, want)
+			}
+			if !reflect.DeepEqual(l.Journal()[:len(before)], before) {
+				t.Fatal("settlement rewrote earlier journal records")
+			}
+
+			// A fresh event ID cannot settle the same authorization twice.
+			event.ID = "duplicate-capture"
+			size := len(l.Journal())
+
+			if err := l.Apply(event); !errors.Is(err, ledger.ErrDuplicate) {
+				t.Fatalf("duplicate error = %v", err)
+			}
+			added := l.Journal()[size:]
+			if len(added) != 1 || added[0].Kind != ledger.Input ||
+				added[0].Rejected == "" {
+				t.Fatalf("duplicate records = %+v", added)
+			}
+			if l.Balance("ACC-001", 1) != tc.balance {
+				t.Fatal("duplicate settlement moved money")
+			}
+		})
+	}
+}
+
+func TestSettlementWithoutActiveAuthorizationPostsAsUnmatched(t *testing.T) {
+	for _, prior := range []string{"missing", "declined"} {
+		t.Run(prior, func(t *testing.T) {
+			l := newTestLedger(t)
+			applyEvents(t, l,
+				accountEvent("fund", 1, ledger.Credit, aed(500_00)),
+			)
+
+			if prior == "declined" {
+				hold := accountEvent("reserve", 1, ledger.Authorization, aed(600_00))
+				hold.AuthID = "purchase-a"
+
+				if err := l.Apply(hold); !errors.Is(err, ledger.ErrDeclined) {
+					t.Fatalf("authorization error = %v", err)
+				}
+			}
+
+			event := accountEvent("capture", 1, ledger.Settlement, aed(180_00))
+			event.AuthID = "purchase-a"
+			applyEvents(t, l, event)
+
+			if l.Balance("ACC-001", 1) != aed(320_00) ||
+				l.Holds("ACC-001") != aed(0) ||
+				l.Available("ACC-001", 1) != aed(320_00) {
+				t.Fatal("unmatched settlement has wrong financial effect")
+			}
+
+			auths := l.Auths("ACC-001")
+			if len(auths) != 1 || auths[0].Status != ledger.Settled ||
+				!auths[0].Unmatched || auths[0].Paid != aed(180_00) {
+				t.Fatalf("authorization = %+v", auths)
+			}
+		})
+	}
+}
+
+func TestSettlementRequiresAuthorizationID(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(500_00)),
+	)
+	event := accountEvent("capture", 1, ledger.Settlement, aed(180_00))
+
+	if err := l.Apply(event); !errors.Is(err, ledger.ErrInvalid) {
+		t.Fatalf("error = %v", err)
+	}
+	if l.Balance("ACC-001", 1) != aed(500_00) ||
+		len(l.Auths("ACC-001")) != 0 {
+		t.Fatal("invalid settlement changed financial state")
+	}
+
+	records := l.Journal()
+	last := records[len(records)-1]
+	if last.Kind != ledger.Input || last.Event != event || last.Rejected == "" {
+		t.Fatalf("rejected input = %+v", last)
+	}
+}
+
+func TestSettlementCannotReleaseAnotherAccountsHold(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund-aed", 1, ledger.Credit, aed(100_00)),
+	)
+
+	hold := accountEvent("reserve", 1, ledger.Authorization, aed(50_00))
+	hold.AuthID = "shared-id"
+	applyEvents(t, l, hold)
+
+	fund := accountEvent("fund-bhd", 1, ledger.Credit, bhd(20_000))
+	fund.AccountID = "ACC-002"
+
+	event := accountEvent("capture-bhd", 1, ledger.Settlement, bhd(5_000))
+	event.AccountID, event.AuthID = "ACC-002", hold.AuthID
+	applyEvents(t, l, fund, event)
+
+	if l.Balance("ACC-001", 1) != aed(100_00) ||
+		l.Holds("ACC-001") != aed(50_00) {
+		t.Fatal("BHD settlement changed the AED account")
+	}
+	if l.Balance("ACC-002", 1) != bhd(15_000) ||
+		l.Holds("ACC-002") != bhd(0) {
+		t.Fatal("wrong BHD settlement effect")
+	}
+
+	auths := l.Auths("ACC-002")
+	if len(auths) != 1 || auths[0].Status != ledger.Settled ||
+		!auths[0].Unmatched {
+		t.Fatalf("settlement matched another account's authorization: %+v", auths)
+	}
+}

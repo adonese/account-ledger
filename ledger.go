@@ -95,6 +95,10 @@ func (l *Ledger) plan(event Event) ([]Record, error) {
 		return nil, fmt.Errorf("Ledger.plan: %w: amount must be positive", ErrInvalid)
 	}
 	switch event.Kind {
+	case Settlement:
+		return l.settle(event)
+	case Authorization:
+		return l.authorize(event)
 	case Credit:
 		return []Record{posting(event, event.Amount)}, nil
 	case Debit:
@@ -114,4 +118,41 @@ func (l *Ledger) Close() {
 	for l.today <= LastDay {
 		l.closeDay()
 	}
+}
+
+func (l *Ledger) authorize(event Event) ([]Record, error) {
+	if event.AuthID == "" {
+		return nil, fmt.Errorf("Ledger.authorize %w: missing authorization ID", ErrInvalid)
+	}
+	if _, exists := l.auth(event.AccountID, event.AuthID); exists {
+		return nil, fmt.Errorf("Ledger.authorize: %w: authorization ID %q", ErrDuplicate, event.AuthID)
+	}
+
+	auth := Auth{ID: event.AuthID, Status: Active, Hold: event.Amount}
+	available := l.Available(event.AccountID, l.today)
+	if available.Minor < event.Amount.Minor {
+		auth.Status = Declined
+		return []Record{{
+			Kind: AuthState, Auth: auth,
+		}}, fmt.Errorf("Ledger.authorize: %w: hold %s exceeds available %s", ErrDeclined, event.Amount, available)
+	}
+	return []Record{{Kind: AuthState, Auth: auth}}, nil
+}
+
+func (l *Ledger) settle(event Event) ([]Record, error) {
+	if event.AuthID == "" {
+		return nil, fmt.Errorf("Ledger.settle: %w: missing authorization ID", ErrInvalid)
+	}
+	auth, _ := l.auth(event.AccountID, event.AuthID)
+	if auth.Status == Settled {
+		return nil, fmt.Errorf("Ledger.settle: %w: settlement of %q", ErrDuplicate, event.AuthID)
+	}
+
+	settled := Auth{
+		ID: event.AuthID, Status: Settled, Hold: auth.Hold, Paid: event.Amount, Unmatched: auth.Status != Active,
+	}
+	return []Record{
+		posting(event, event.Amount.Neg()),
+		{Kind: AuthState, Auth: settled},
+	}, nil
 }

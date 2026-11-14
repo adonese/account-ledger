@@ -59,3 +59,45 @@ func (v View) Before(seq int) View {
 		accounts: v.accounts, journal: v.journal[:seq-1],
 	}
 }
+
+func (v View) Auths(accountID string) []Auth {
+	var auths []Auth
+	for _, record := range v.journal {
+		if record.Kind != AuthState || record.AccountID != accountID {
+			continue // check a valid event
+		}
+		i := slices.IndexFunc(auths, func(a Auth) bool {
+			return a.ID == record.Auth.ID
+		})
+		if i >= 0 {
+			auths[i] = record.Auth
+		} else {
+			auths = append(auths, record.Auth)
+		}
+	}
+	return auths
+}
+
+func (v View) Holds(accountID string) Money {
+	account, _ := v.account(accountID)
+	holds := Money{Currency: account.Opening.Currency}
+	for _, auth := range v.Auths(accountID) {
+		if auth.Status == Active {
+			holds = holds.Add(auth.Hold)
+		}
+	}
+	return holds
+}
+
+func (v View) Available(accountID string, day Day) Money {
+	return v.Balance(accountID, day).Add(v.Holds(accountID).Neg())
+}
+
+func (v View) auth(accountID, authID string) (Auth, bool) {
+	for _, auth := range v.Auths(accountID) {
+		if auth.ID == authID {
+			return auth, true
+		}
+	}
+	return Auth{}, false
+}
