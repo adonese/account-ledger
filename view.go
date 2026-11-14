@@ -14,14 +14,18 @@ func (v View) Accounts() []Account {
 func (v View) Journal() []Record {
 	return slices.Clone(v.journal)
 }
+
 func (v View) Balance(accountID string, day Day) Money {
 	account, _ := v.account(accountID)
 	balance := account.Opening
+
 	for _, record := range v.journal {
-		if record.Kind == Posting && record.AccountID == accountID && record.ValueDay <= day {
+		if (record.Kind == Posting || record.Kind == Fee) &&
+			record.AccountID == accountID && record.ValueDay <= day {
 			balance = balance.Add(record.Amount)
 		}
 	}
+
 	return balance
 }
 
@@ -91,6 +95,21 @@ func (v View) Holds(accountID string) Money {
 
 func (v View) Available(accountID string, day Day) Money {
 	return v.Balance(accountID, day).Add(v.Holds(accountID).Neg())
+}
+
+// Fee returns the amount charged for this day as a positive value.
+func (v View) Fee(accountID string, day Day) Money {
+	account, _ := v.account(accountID)
+	total := Money{Currency: account.Opening.Currency}
+
+	for _, record := range v.journal {
+		if record.Kind == Fee &&
+			record.AccountID == accountID && record.ValueDay == day {
+			total = total.Add(record.Amount)
+		}
+	}
+
+	return total.Neg()
 }
 
 func (v View) auth(accountID, authID string) (Auth, bool) {

@@ -21,6 +21,10 @@ type Ledger struct {
 	today Day // opening day
 }
 
+var overdraftFee = map[Currency]Money{
+	AED: {Currency: AED, Minor: 25_00},
+}
+
 // New opens ledger on day 1
 func New(accounts []Account) (*Ledger, error) {
 	l := &Ledger{today: FirstDay}
@@ -71,6 +75,11 @@ func (l *Ledger) Apply(event Event) error {
 		record.AccountID = event.AccountID
 		l.append(record)
 	}
+
+	if err == nil {
+		l.reassess(event.ID)
+	}
+
 	return err
 }
 
@@ -126,8 +135,37 @@ func (l *Ledger) plan(event Event) ([]Record, error) {
 }
 
 func (l *Ledger) closeDay() {
+	for _, account := range l.accounts {
+		l.assess(account, l.today, "")
+	}
+
 	l.append(Record{Kind: DayClosed, ValueDay: l.today})
 	l.today++
+}
+
+// reassess visits closed days oldest first because earlier fees
+// affect later balances. The current open day waits for close.
+func (l *Ledger) reassess(eventID string) {
+	for day := FirstDay; day < l.today; day++ {
+		for _, account := range l.accounts {
+			l.assess(account, day, eventID)
+		}
+	}
+}
+
+func (l *Ledger) assess(account Account, day Day, eventID string) {
+	balance := l.Balance(account.ID, day)
+	fee, priced := overdraftFee[balance.Currency]
+
+	if priced && balance.Minor < 0 && l.Fee(account.ID, day).Minor == 0 {
+		l.append(Record{
+			Kind:      Fee,
+			EventID:   eventID,
+			AccountID: account.ID,
+			ValueDay:  day,
+			Amount:    fee.Neg(),
+		})
+	}
 }
 
 func (l *Ledger) Close() {
