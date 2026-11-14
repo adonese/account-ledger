@@ -671,3 +671,137 @@ func TestSettlementReversalDoesNotReopenTheHold(t *testing.T) {
 		t.Fatalf("settlement reversal changed authorization history: %+v", got)
 	}
 }
+
+func TestInstalmentsConserveMoneyAndPreserveInput(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		account string
+		total   ledger.Money
+		count   int
+		want    []ledger.Money
+	}{
+		{"BHD remainder", "ACC-002", bhd(10_000), 3,
+			[]ledger.Money{bhd(3_334), bhd(3_333), bhd(3_333)}},
+		{"AED remainder", "ACC-001", aed(101), 4,
+			[]ledger.Money{aed(26), aed(25), aed(25), aed(25)}},
+		{"exact division", "ACC-001", aed(100), 4,
+			[]ledger.Money{aed(25), aed(25), aed(25), aed(25)}},
+		{"more parts than units", "ACC-001", aed(2), 5,
+			[]ledger.Money{aed(1), aed(1), aed(0), aed(0), aed(0)}},
+		{"single part", "ACC-002", bhd(1), 1,
+			[]ledger.Money{bhd(1)}},
+		{"zero means one", "ACC-001", aed(10_00), 0,
+			[]ledger.Money{aed(10_00)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := newTestLedger(t)
+			event := accountEvent("split-credit", 2, ledger.Credit, tc.total)
+			event.AccountID = tc.account
+			event.ValueDay = 1
+			event.Instalments = tc.count
+			applyEvents(t, l, event)
+
+			var parts []ledger.Money
+			inputs := 0
+			total := ledger.Money{Currency: tc.total.Currency}
+
+			for _, record := range l.Journal() {
+				if record.EventID != event.ID {
+					continue
+				}
+
+				switch record.Kind {
+				case ledger.Input:
+					inputs++
+					if record.Event != event || record.Rejected != "" {
+						t.Fatalf("original input changed: %+v", record)
+					}
+				case ledger.Posting:
+					if record.AccountID != tc.account || record.ValueDay != 1 ||
+						record.Day != 2 || record.Amount.Currency != tc.total.Currency ||
+						record.Amount.Minor < 0 {
+						t.Fatalf("invalid split posting: %+v", record)
+					}
+					parts = append(parts, record.Amount)
+					total = total.Add(record.Amount)
+				}
+			}
+
+			if inputs != 1 || !reflect.DeepEqual(parts, tc.want) {
+				t.Fatalf("inputs = %d, parts = %v, want %v",
+					inputs, parts, tc.want)
+			}
+			if total != tc.total || l.Balance(tc.account, 1) != tc.total {
+				t.Fatalf("split did not conserve money: total = %v", total)
+			}
+
+			smallest, largest := parts[0].Minor, parts[0].Minor
+			for _, part := range parts {
+				smallest = min(smallest, part.Minor)
+				largest = max(largest, part.Minor)
+			}
+			if largest-smallest > 1 {
+				t.Fatalf("parts differ by more than one minor unit: %v", parts)
+			}
+		})
+	}
+}
+
+func TestNegativeInstalmentCountIsRejected(t *testing.T) {
+	l := newTestLedger(t)
+	event := accountEvent("invalid-split", 1, ledger.Credit, aed(10_00))
+	event.Instalments = -1
+
+	if err := l.Apply(event); !errors.Is(err, ledger.ErrInvalid) {
+		t.Fatalf("error = %v", err)
+	}
+
+	records := l.Journal()
+	if len(records) != 1 || records[0].Kind != ledger.Input ||
+		records[0].Event != event || records[0].Rejected == "" {
+		t.Fatalf("rejection records = %+v", records)
+	}
+	if l.Balance("ACC-001", 1) != aed(0) {
+		t.Fatal("invalid split moved money")
+	}
+}
+
+func TestSplitCreditPostsOnceAndReversesTheWholeAmount(t *testing.T) {
+	l := newTestLedger(t)
+	event := accountEvent("split-credit", 1, ledger.Credit, bhd(10_000))
+	event.AccountID, event.Instalments = "ACC-002", 3
+	applyEvents(t, l, event)
+
+	size := len(l.Journal())
+	if err := l.Apply(event); !errors.Is(err, ledger.ErrDuplicate) {
+		t.Fatalf("duplicate error = %v", err)
+	}
+	added := l.Journal()[size:]
+	if len(added) != 1 || added[0].Kind != ledger.Input ||
+		added[0].Rejected == "" {
+		t.Fatalf("duplicate records = %+v", added)
+	}
+	if l.Balance("ACC-002", 1) != bhd(10_000) {
+		t.Fatal("duplicate split moved money")
+	}
+
+	before := l.Journal()
+	applyEvents(t, l, ledger.Event{
+		ID: "undo-split", BookedDay: 1, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-002",
+		Reverses: event.ID,
+	})
+
+	after := l.Journal()
+	if !reflect.DeepEqual(after[:len(before)], before) {
+		t.Fatal("reversal rewrote the original split")
+	}
+	added = after[len(before):]
+	if len(added) != 2 || added[1].Kind != ledger.Posting ||
+		added[1].Amount != bhd(-10_000) {
+		t.Fatalf("reversal records = %+v", added)
+	}
+	if l.Balance("ACC-002", 1) != bhd(0) {
+		t.Fatal("split credit was not fully reversed")
+	}
+}

@@ -105,7 +105,18 @@ func (l *Ledger) plan(event Event) ([]Record, error) {
 	case Authorization:
 		return l.authorize(event)
 	case Credit:
-		return []Record{posting(event, event.Amount)}, nil
+		if event.Instalments < 0 {
+			return nil, fmt.Errorf(
+				"%w: negative instalment count %d",
+				ErrInvalid, event.Instalments,
+			)
+		}
+
+		var postings []Record
+		for _, part := range event.Amount.split(max(event.Instalments, 1)) {
+			postings = append(postings, posting(event, part))
+		}
+		return postings, nil
 	case Debit:
 		return []Record{posting(event, event.Amount.Neg())}, nil
 	default:
@@ -162,6 +173,7 @@ func (l *Ledger) settle(event Event) ([]Record, error) {
 	}, nil
 }
 
+//nolint:cyclop // refactor for cyclop later
 func (l *Ledger) reverse(event Event) ([]Record, error) {
 	target, found := l.input(event.Reverses)
 

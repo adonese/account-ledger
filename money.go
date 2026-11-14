@@ -53,3 +53,19 @@ func (m Money) Add(o Money) Money {
 }
 
 func (m Money) Neg() Money { return Money{m.Currency, -m.Minor} }
+
+// split divides a positive amount into n parts, where n >= 1.
+// Earlier parts receive the extra minor units.
+func (m Money) split(n int) []Money {
+	parts := make([]Money, n)
+	each, extra := m.Minor/int64(n), m.Minor%int64(n)
+
+	for i := range parts {
+		parts[i] = Money{Currency: m.Currency, Minor: each}
+		if int64(i) < extra {
+			parts[i].Minor++
+		}
+	}
+
+	return parts
+}
