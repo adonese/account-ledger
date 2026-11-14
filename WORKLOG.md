@@ -7,3 +7,5 @@ So so far it was just setting up the repo with golang (1.27) and adding golanci 
 - One decision is to use int64 for minor. The problem here is that this can overflow. We have updated in the REJECTED.md why other packages were rejected.
 
 - instalments part: there will be leftovers because 1000 is not divisable by 3
+
+We currently are at ledger and journal part. Nothing big, basically having views over the journal and added tests
