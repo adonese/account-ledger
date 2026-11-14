@@ -16,7 +16,13 @@ func (v View) Journal() []Record {
 }
 func (v View) Balance(accountID string, day Day) Money {
 	account, _ := v.account(accountID)
-	return account.Opening
+	balance := account.Opening
+	for _, record := range v.journal {
+		if record.Kind == Posting && record.AccountID == accountID && record.ValueDay <= day {
+			balance = balance.Add(record.Amount)
+		}
+	}
+	return balance
 }
 
 func (v View) account(id string) (Account, bool) {
@@ -26,4 +32,13 @@ func (v View) account(id string) (Account, bool) {
 		}
 	}
 	return Account{}, false
+}
+
+func (v View) input(eventID string) (Record, bool) {
+	for _, record := range v.journal {
+		if record.Kind == Input && record.EventID == eventID {
+			return record, true
+		}
+	}
+	return Record{}, false
 }

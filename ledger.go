@@ -35,3 +35,71 @@ func New(accounts []Account) (*Ledger, error) {
 	return l, nil
 
 }
+
+func (l *Ledger) append(r Record) {
+	r.Seq = len(l.journal) + 1
+	r.Day = l.today
+	l.journal = append(l.journal, r)
+}
+
+func (l *Ledger) Apply(event Event) error {
+	var effects []Record
+	var err error
+	switch {
+	case l.today > LastDay:
+		err = ErrClosed
+	case !event.BookedDay.inWindow():
+		err = fmt.Errorf("Ledger.Apply: %w booked day %d is outside the window", ErrInvalid, event.BookedDay)
+	default:
+		// advance the processing day without closing days
+		if event.BookedDay > l.today {
+			l.today = event.BookedDay
+		}
+		effects, err = l.plan(event)
+	}
+	input := Record{
+		Kind: Input, Event: event, EventID: event.ID, AccountID: event.AccountID,
+	}
+	if err != nil {
+		input.Rejected = err.Error()
+	}
+	l.append(input)
+
+	for _, record := range effects {
+		record.EventID = event.ID
+		record.AccountID = event.AccountID
+		l.append(record)
+	}
+	return err
+}
+
+func (l *Ledger) plan(event Event) ([]Record, error) {
+	account, known := l.account(event.AccountID)
+	_, seen := l.input(event.ID)
+	switch {
+	case event.ID == "":
+		return nil, fmt.Errorf("Ledger.plan: %w: missing event ID", ErrInvalid)
+	case seen:
+		return nil, fmt.Errorf("Ledger.plan: %w: event ID %q", ErrDuplicate, event.ID)
+	case !known:
+		return nil, fmt.Errorf("Ledger.plan: %w %q", ErrUnknownAccount, event.AccountID)
+	case !event.ValueDay.inWindow() || event.ValueDay > event.BookedDay:
+		return nil, fmt.Errorf(
+			"Ledger.plan: %w: value day %d must be within the window and not after booked day %d",
+			ErrInvalid, event.ValueDay, event.BookedDay,
+		)
+	case event.Amount.Currency != account.Opening.Currency:
+		return nil, fmt.Errorf("Ledger.plan: %w: recieved %s for a %s account", ErrCurrency, event.Amount.Currency, account.Opening.Currency)
+	case event.Amount.Minor <= 0:
+		return nil, fmt.Errorf("Ledger.plan: %w: amount must be positive", ErrInvalid)
+	}
+	switch event.Kind {
+	case Credit:
+		return []Record{posting(event, event.Amount)}, nil
+	case Debit:
+		return []Record{posting(event, event.Amount.Neg())}, nil
+	default:
+		return nil, fmt.Errorf("Ledger.plan: %w unsupported event kind %q", ErrInvalid, event.Kind)
+	}
+
+}

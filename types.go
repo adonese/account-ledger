@@ -76,3 +76,11 @@ type Record struct {
 	Amount    Money  // signed change represented by this record
 	Auth      Auth
 }
+
+func (d Day) inWindow() bool {
+	return d >= FirstDay && d <= LastDay
+}
+
+func posting(e Event, amount Money) Record {
+	return Record{Kind: Posting, ValueDay: e.ValueDay, Amount: amount}
+}
