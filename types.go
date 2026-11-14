@@ -14,8 +14,8 @@ const (
 	Credit        EventKind = "CREDIT"
 	Debit         EventKind = "DEBIT"
 	Authorization EventKind = "AUTHORIZATION"
-	Settlement    EventKind = "Settlement"
-	Reversal      EventKind = "Reversal"
+	Settlement    EventKind = "SETTLEMENT"
+	Reversal      EventKind = "REVERSAL"
 )
 
 type Event struct {

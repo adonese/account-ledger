@@ -41,6 +41,20 @@ func New(accounts []Account) (*Ledger, error) {
 
 }
 
+// Replay applies caller-supplied events in arrival order and closes the window.
+// Account setup errors are returned; event rejections stay in the journal.
+func Replay(accounts []Account, events []Event) (*Ledger, error) {
+	l, err := New(accounts)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		_ = l.Apply(event) // Apply journals the rejection before replay continues.
+	}
+	l.Close()
+	return l, nil
+}
+
 func (l *Ledger) append(r Record) {
 	r.Seq = len(l.journal) + 1
 	r.Day = l.today
