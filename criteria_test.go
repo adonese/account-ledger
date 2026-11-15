@@ -66,7 +66,7 @@ func TestCriterion3AuthASettlementIsAccepted(t *testing.T) {
 	}
 }
 
-// Conditional policy refusal: settlement inputs are trusted confirmed obligations.
+// Refused: a settlement reports money already paid; dropping it misstates the balance.
 func TestCriterion4UnmatchedSettlementPostsWithWarning(t *testing.T) {
 	l := streamPrefix(t, 6)
 	auths := l.Auths("ACC-001")
@@ -89,7 +89,7 @@ func TestCriterion5ApprovedAuthBOnlyReducesAvailability(t *testing.T) {
 	}
 }
 
-// Conditional policy refusal: principal reversal leaves already assessed fees in place.
+// Refused: reversing principal leaves the already assessed fees in place.
 func TestCriterion6ReversalRetainsFees(t *testing.T) {
 	before, after := streamPrefix(t, 6), streamPrefix(t, 9)
 	for day, shortfall := range map[ledger.Day]ledger.Money{2: aed(25_00), 3: aed(25_00), 4: aed(50_00), 5: aed(75_00)} {
