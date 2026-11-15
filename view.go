@@ -72,7 +72,11 @@ func (v View) AtClose(day Day) View {
 	return v
 }
 
+// Before returns the prefix before seq; seq must be in [1, journal length + 1].
 func (v View) Before(seq int) View {
+	if seq < 1 || seq-1 > len(v.journal) {
+		panic("View.Before: sequence outside view")
+	}
 	return View{
 		accounts: v.accounts, journal: v.journal[:seq-1], idx: v.idx,
 	}

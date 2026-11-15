@@ -16,10 +16,16 @@ var (
 	ErrReversal       = errors.New("cannot reverse")
 )
 
+// The private alias promotes read methods without exposing a replaceable field.
+type ledgerView = View
+
 type Ledger struct {
-	View
+	ledgerView
 	today Day // opening day
 }
+
+// View returns a read-only snapshot of the current journal.
+func (l *Ledger) View() View { return l.ledgerView }
 
 var overdraftFee = map[Currency]Money{
 	AED: {Currency: AED, Minor: 25_00},
@@ -27,7 +33,7 @@ var overdraftFee = map[Currency]Money{
 
 // New opens ledger on day 1
 func New(accounts []Account) (*Ledger, error) {
-	l := &Ledger{today: FirstDay, View: View{idx: &index{
+	l := &Ledger{today: FirstDay, ledgerView: View{idx: &index{
 		accounts: map[string]int{}, byAccount: map[string][]int{}, inputs: map[string]int{},
 	}}}
 	for _, a := range accounts {
@@ -80,11 +86,13 @@ func (l *Ledger) Apply(event Event) error {
 	case !event.BookedDay.inWindow():
 		err = fmt.Errorf("Ledger.Apply: %w booked day %d is outside the window", ErrInvalid, event.BookedDay)
 	default:
-		// close proceeding days before processing the event.
-		for l.today < event.BookedDay {
-			l.closeDay()
-		}
 		effects, err = l.plan(event)
+		// Invalid input cannot advance time. A funds decline is a valid request.
+		for (err == nil || errors.Is(err, ErrDeclined)) && l.today < event.BookedDay {
+			l.closeDay()
+			// Re-plan after each close to include any new fees.
+			effects, err = l.plan(event)
+		}
 	}
 	input := Record{
 		Kind: Input, Event: event, EventID: event.ID, AccountID: event.AccountID,

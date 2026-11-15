@@ -13,7 +13,7 @@ func TestHistoricalViewsAndReturnedValuesAreIsolated(t *testing.T) {
 	hold := accountEvent("reserve", 1, ledger.Authorization, aed(20_00))
 	hold.AuthID = "purchase"
 	applyEvents(t, l, hold)
-	original := l.View
+	original := l.View()
 	history, accounts, auths := original.Journal(), original.Accounts(), original.Auths("ACC-001")
 	for _, prefix := range []ledger.View{original.Before(1), original.Before(3), original.Before(len(history) + 1)} {
 		before := prefix.Journal()

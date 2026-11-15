@@ -63,3 +63,10 @@ The rest of the notes are codex generated but directly with me reviewing back an
   with a Day 1 overdraft followed by a rejected Day 6 event charged AED 125.00
   for Days 1–5. Rejecting an event can therefore still trigger fees; validation
   needs to happen before advancing the day.
+
+## Review fixes
+
+- Reproduced public-view replacement, invalid-input day close, and historical
+  prefix extension in three failing regression tests, then made all three pass.
+- Made the stored view private, added `View()` for snapshots, validated inputs
+  before advancing days, and checked `Before` against the selected view's length.
