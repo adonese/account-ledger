@@ -1,0 +1,17 @@
+# Binaries from `go build ./cmd/...` in the repo root
+/replay
+/bench
+
+# `go test -c` binaries, coverage and CPU profiles
+*.test
+*.out
+*.prof
+
+# Local Go workspace files
+go.work
+go.work.sum
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
