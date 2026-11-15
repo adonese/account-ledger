@@ -27,7 +27,9 @@ var overdraftFee = map[Currency]Money{
 
 // New opens ledger on day 1
 func New(accounts []Account) (*Ledger, error) {
-	l := &Ledger{today: FirstDay}
+	l := &Ledger{today: FirstDay, View: View{idx: &index{
+		accounts: map[string]int{}, byAccount: map[string][]int{}, inputs: map[string]int{},
+	}}}
 	for _, a := range accounts {
 		if _, known := decimals[a.Opening.Currency]; !known {
 			return nil, fmt.Errorf("Ledger.New(): account %q: unupported currency %q", a.ID, a.Opening.Currency)
@@ -35,6 +37,7 @@ func New(accounts []Account) (*Ledger, error) {
 		if _, repeated := l.account(a.ID); repeated || a.ID == "" {
 			return nil, fmt.Errorf("Ledger.New(): account ID %q is empty or repeated", a.ID)
 		}
+		l.idx.accounts[a.ID] = len(l.accounts)
 		l.accounts = append(l.accounts, a)
 	}
 	return l, nil
@@ -56,9 +59,16 @@ func Replay(accounts []Account, events []Event) (*Ledger, error) {
 }
 
 func (l *Ledger) append(r Record) {
-	r.Seq = len(l.journal) + 1
+	pos := len(l.journal)
+	r.Seq = pos + 1
 	r.Day = l.today
 	l.journal = append(l.journal, r)
+	if r.AccountID != "" {
+		l.idx.byAccount[r.AccountID] = append(l.idx.byAccount[r.AccountID], pos)
+	}
+	if _, seen := l.idx.inputs[r.EventID]; r.Kind == Input && !seen {
+		l.idx.inputs[r.EventID] = pos
+	}
 }
 
 func (l *Ledger) Apply(event Event) error {
@@ -91,7 +101,7 @@ func (l *Ledger) Apply(event Event) error {
 	}
 
 	if err == nil {
-		l.reassess(event.ID)
+		l.reassess(event)
 	}
 
 	return err
@@ -161,13 +171,17 @@ func (l *Ledger) closeDay() {
 	l.today++
 }
 
-// reassess visits closed days oldest first because earlier fees
-// affect later balances. The current open day waits for close.
-func (l *Ledger) reassess(eventID string) {
-	for day := FirstDay; day < l.today; day++ {
-		for _, account := range l.accounts {
-			l.assess(account, day, eventID)
-		}
+// reassess visits the event's account only, from its value day, oldest
+// first because earlier fees affect later balances. Other accounts and
+// earlier days cannot have changed. A hold is not a ledger entry, so an
+// authorization changes no balance. The current open day waits for close.
+func (l *Ledger) reassess(event Event) {
+	if event.Kind == Authorization {
+		return
+	}
+	account, _ := l.account(event.AccountID)
+	for day := event.ValueDay; day < l.today; day++ {
+		l.assess(account, day, event.ID)
 	}
 }
 
@@ -256,7 +270,8 @@ func (l *Ledger) settle(event Event) ([]Record, error) {
 func (l *Ledger) reverse(event Event) ([]Record, error) {
 	target, found := l.input(event.Reverses)
 
-	reversed := slices.ContainsFunc(l.journal, func(record Record) bool {
+	reversed := slices.ContainsFunc(l.lines(event.AccountID), func(pos int) bool {
+		record := l.journal[pos]
 		return record.Kind == Input && record.Rejected == "" &&
 			record.Event.Kind == Reversal &&
 			record.Event.Reverses == event.Reverses

@@ -1,11 +1,28 @@
 package ledger
 
-import "slices"
+import (
+	"slices"
+)
 
 // View is a read-only state of the account ledger.
 type View struct {
 	accounts []Account // there's a small trick to use obscure identifiers e.g. 𝛂
 	journal  []Record
+	idx      *index // positions, not money; shared by every prefix
+}
+
+// index records journal positions by account and the first input per event ID.
+type index struct {
+	accounts  map[string]int
+	byAccount map[string][]int
+	inputs    map[string]int
+}
+
+// lines returns an account's journal positions inside this view's prefix.
+func (v View) lines(accountID string) []int {
+	positions := v.idx.byAccount[accountID]
+	n, _ := slices.BinarySearch(positions, len(v.journal))
+	return positions[:n]
 }
 
 func (v View) Accounts() []Account {
@@ -19,7 +36,8 @@ func (v View) Balance(accountID string, day Day) Money {
 	account, _ := v.account(accountID)
 	balance := account.Opening
 
-	for _, record := range v.journal {
+	for _, pos := range v.lines(accountID) {
+		record := v.journal[pos]
 		if (record.Kind == Posting || record.Kind == Fee || record.Kind == Interest) &&
 			record.AccountID == accountID && record.ValueDay <= day {
 			balance = balance.Add(record.Amount)
@@ -30,19 +48,15 @@ func (v View) Balance(accountID string, day Day) Money {
 }
 
 func (v View) account(id string) (Account, bool) {
-	for _, acc := range v.accounts {
-		if acc.ID == id {
-			return acc, true
-		}
+	if i, ok := v.idx.accounts[id]; ok {
+		return v.accounts[i], true
 	}
 	return Account{}, false
 }
 
 func (v View) input(eventID string) (Record, bool) {
-	for _, record := range v.journal {
-		if record.Kind == Input && record.EventID == eventID {
-			return record, true
-		}
+	if pos, ok := v.idx.inputs[eventID]; ok && pos < len(v.journal) {
+		return v.journal[pos], true
 	}
 	return Record{}, false
 }
@@ -51,7 +65,7 @@ func (v View) AtClose(day Day) View {
 	for _, record := range v.journal {
 		if record.Kind == DayClosed && record.ValueDay == day {
 			return View{
-				accounts: v.accounts, journal: v.journal[:record.Seq],
+				accounts: v.accounts, journal: v.journal[:record.Seq], idx: v.idx,
 			}
 		}
 	}
@@ -60,13 +74,14 @@ func (v View) AtClose(day Day) View {
 
 func (v View) Before(seq int) View {
 	return View{
-		accounts: v.accounts, journal: v.journal[:seq-1],
+		accounts: v.accounts, journal: v.journal[:seq-1], idx: v.idx,
 	}
 }
 
 func (v View) Auths(accountID string) []Auth {
 	var auths []Auth
-	for _, record := range v.journal {
+	for _, pos := range v.lines(accountID) {
+		record := v.journal[pos]
 		if record.Kind != AuthState || record.AccountID != accountID {
 			continue // check a valid event
 		}
@@ -102,7 +117,8 @@ func (v View) Fee(accountID string, day Day) Money {
 	account, _ := v.account(accountID)
 	total := Money{Currency: account.Opening.Currency}
 
-	for _, record := range v.journal {
+	for _, pos := range v.lines(accountID) {
+		record := v.journal[pos]
 		if record.Kind == Fee &&
 			record.AccountID == accountID && record.ValueDay == day {
 			total = total.Add(record.Amount)
@@ -117,7 +133,8 @@ func (v View) Accrued(accountID string, day Day) Money {
 	account, _ := v.account(accountID)
 	total := Money{Currency: account.Opening.Currency}
 
-	for _, record := range v.journal {
+	for _, pos := range v.lines(accountID) {
+		record := v.journal[pos]
 		if record.Kind == Accrual &&
 			record.AccountID == accountID && record.ValueDay == day {
 			total = total.Add(record.Amount)
