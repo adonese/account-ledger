@@ -543,9 +543,14 @@ func TestReversalAppendsCompensationOnOriginalValueDay(t *testing.T) {
 				t.Fatal("reversal rewrote earlier records")
 			}
 			added := after[len(before):]
-			if len(added) != 2 || added[0].Kind != ledger.Input ||
+			if len(added) < 2 || added[0].Kind != ledger.Input ||
 				added[0].Event != reversal {
 				t.Fatalf("reversal records = %+v", added)
+			}
+			for _, record := range added[2:] {
+				if record.Kind != ledger.Accrual {
+					t.Fatalf("unexpected reversal effect: %+v", record)
+				}
 			}
 
 			posting := added[1]
@@ -803,5 +808,394 @@ func TestSplitCreditPostsOnceAndReversesTheWholeAmount(t *testing.T) {
 	}
 	if l.Balance("ACC-002", 1) != bhd(0) {
 		t.Fatal("split credit was not fully reversed")
+	}
+}
+
+func TestOneOverdraftFeePerAccountAndDay(t *testing.T) {
+	l, err := ledger.New([]ledger.Account{
+		{ID: "ACC-001", Opening: aed(0)},
+		{ID: "second", Opening: aed(0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"ACC-001", "second"} {
+		event := accountEvent("debit-"+id, 1, ledger.Debit, aed(1))
+		event.AccountID = id
+		applyEvents(t, l, event)
+
+		if l.Fee(id, 1) != aed(0) {
+			t.Fatal("open day was charged before close")
+		}
+	}
+
+	l.Close()
+	before := l.Journal()
+	l.Close()
+	if !reflect.DeepEqual(before, l.Journal()) {
+		t.Fatal("repeated Close changed the journal")
+	}
+
+	for _, id := range []string{"ACC-001", "second"} {
+		for day := ledger.FirstDay; day <= ledger.LastDay; day++ {
+			if l.Fee(id, day) != aed(25_00) ||
+				l.AtClose(day).Fee(id, day) != aed(25_00) {
+				t.Fatalf("%s Day %d: missing fee at close", id, day)
+			}
+
+			count := 0
+			for _, record := range l.Journal() {
+				if record.Kind == ledger.Fee &&
+					record.AccountID == id && record.ValueDay == day {
+					count++
+					if record.Amount != aed(-25_00) ||
+						record.Day != day || record.EventID != "" {
+						t.Fatalf("fee record = %+v", record)
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("%s Day %d: %d fee records", id, day, count)
+			}
+		}
+
+		if l.Balance(id, 6) != aed(-150_01) {
+			t.Fatalf("%s: fees did not reduce the ledger balance", id)
+		}
+	}
+}
+
+func TestBackdatedFeesCascadeAndSurviveReversal(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+		accountEvent("day-two-credit", 2, ledger.Credit, aed(11_00)),
+	)
+
+	late := accountEvent("late-debit", 3, ledger.Debit, aed(101_00))
+	late.ValueDay = 1
+	applyEvents(t, l, late)
+
+	// Day 1: 100 - 101 - 25 = -26.
+	// Day 2: -26 + 11 - 25 = -40.
+	// The Day 1 fee causes Day 2's overdraft.
+	if l.Balance("ACC-001", 1) != aed(-26_00) ||
+		l.Balance("ACC-001", 2) != aed(-40_00) {
+		t.Fatal("earlier fees did not carry into later balances")
+	}
+
+	if l.AtClose(1).Balance("ACC-001", 1) != aed(100_00) ||
+		l.AtClose(2).Balance("ACC-001", 2) != aed(111_00) ||
+		l.AtClose(1).Fee("ACC-001", 1) != aed(0) ||
+		l.AtClose(2).Fee("ACC-001", 2) != aed(0) {
+		t.Fatal("original closes changed")
+	}
+	if l.Fee("ACC-001", 3) != aed(0) {
+		t.Fatal("open Day 3 was charged early")
+	}
+
+	var feeDays []ledger.Day
+	for _, record := range l.Journal() {
+		if record.Kind == ledger.Fee {
+			feeDays = append(feeDays, record.ValueDay)
+			if record.Day != 3 || record.EventID != late.ID ||
+				record.Amount != aed(-25_00) {
+				t.Fatalf("retrospective fee = %+v", record)
+			}
+		}
+	}
+	if !reflect.DeepEqual(feeDays, []ledger.Day{1, 2}) {
+		t.Fatalf("fee assessment order = %v", feeDays)
+	}
+
+	// Another accepted event reassesses still-negative closed days.
+	applyEvents(t, l,
+		accountEvent("today-debit", 3, ledger.Debit, aed(1_00)),
+	)
+
+	before := l.Journal()
+	applyEvents(t, l, ledger.Event{
+		ID: "refund", BookedDay: 3, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-001",
+		Reverses: late.ID,
+	})
+
+	if !reflect.DeepEqual(l.Journal()[:len(before)], before) {
+		t.Fatal("reversal rewrote existing fees")
+	}
+	if l.Balance("ACC-001", 2) != aed(61_00) {
+		t.Fatal("reversal did not retain both assessed fees")
+	}
+	for _, day := range []ledger.Day{1, 2} {
+		if l.Fee("ACC-001", day) != aed(25_00) {
+			t.Fatalf("Day %d fee was duplicated or removed", day)
+		}
+	}
+
+	count := 0
+	for _, record := range l.Journal() {
+		if record.Kind == ledger.Fee {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("fee records = %d, want 2", count)
+	}
+}
+
+func TestZeroClosingBalanceHasNoFee(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(1_00)),
+		accountEvent("spend", 1, ledger.Debit, aed(1_00)),
+	)
+	l.Close()
+
+	for day := ledger.FirstDay; day <= ledger.LastDay; day++ {
+		if l.Balance("ACC-001", day) != aed(0) ||
+			l.Fee("ACC-001", day) != aed(0) {
+			t.Fatalf("zero balance incurred a fee on Day %d", day)
+		}
+	}
+}
+
+func TestNegativeAvailabilityDoesNotCauseFees(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+	)
+
+	hold := accountEvent("reserve", 1, ledger.Authorization, aed(100_00))
+	hold.AuthID = "purchase"
+	applyEvents(t, l,
+		hold,
+		accountEvent("spend", 1, ledger.Debit, aed(1_00)),
+	)
+	l.Close()
+
+	if l.Balance("ACC-001", 1) != aed(99_00) ||
+		l.Available("ACC-001", 1) != aed(-1_00) {
+		t.Fatal("unexpected ledger or available balance")
+	}
+	for day := ledger.FirstDay; day <= ledger.LastDay; day++ {
+		if l.Fee("ACC-001", day) != aed(0) {
+			t.Fatalf("hold caused a fee on Day %d", day)
+		}
+	}
+}
+
+func TestUnpricedBHDOverdraftHasNoFee(t *testing.T) {
+	l := newTestLedger(t)
+	event := accountEvent("bhd-debit", 1, ledger.Debit, bhd(1))
+	event.AccountID = "ACC-002"
+	applyEvents(t, l, event)
+	l.Close()
+
+	for day := ledger.FirstDay; day <= ledger.LastDay; day++ {
+		if l.Fee("ACC-002", day) != bhd(0) ||
+			l.Balance("ACC-002", day) != bhd(-1) {
+			t.Fatalf("invented a BHD fee on Day %d", day)
+		}
+	}
+}
+
+func TestDailyInterestRoundsHalfUpInEachCurrency(t *testing.T) {
+	for _, currency := range []ledger.Currency{ledger.AED, ledger.BHD} {
+		for _, tc := range []struct {
+			name  string
+			minor int64
+			want  int64
+		}{
+			{"negative", -2500, 0},
+			{"zero", 0, 0},
+			{"below tie", 1249, 0},
+			{"at tie", 1250, 1},
+			{"above tie", 1251, 1},
+			{"below next tie", 3749, 1},
+			{"at next tie", 3750, 2},
+		} {
+			t.Run(string(currency)+"/"+tc.name, func(t *testing.T) {
+				l, err := ledger.New([]ledger.Account{{
+					ID:      "savings",
+					Opening: ledger.Money{Currency: currency, Minor: tc.minor},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				l.Close()
+				want := ledger.Money{Currency: currency, Minor: tc.want}
+				if got := l.Accrued("savings", 1); got != want {
+					t.Fatalf("daily interest = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestInterestCapitalizesOnlyTheSumOfRoundedAccruals(t *testing.T) {
+	l := newTestLedger(t)
+	bhdFunding := accountEvent("fund-bhd", 1, ledger.Credit, bhd(31_249))
+	bhdFunding.AccountID = "ACC-002"
+
+	applyEvents(t, l,
+		accountEvent("fund-aed", 1, ledger.Credit, aed(12_50)),
+		bhdFunding,
+	)
+
+	// Advance to Day 6 without closing it. The hold also checks that
+	// interest uses ledger balance rather than available balance.
+	hold := accountEvent("reserve", 6, ledger.Authorization, aed(1))
+	hold.AuthID = "purchase"
+	applyEvents(t, l, hold)
+
+	if l.Accrued("ACC-001", 1) != aed(1) ||
+		l.Balance("ACC-001", 6) != aed(12_50) ||
+		l.Available("ACC-001", 6) != aed(12_49) {
+		t.Fatal("accruals changed spendable money")
+	}
+	if l.Accrued("ACC-001", 6) != aed(0) {
+		t.Fatal("open Day 6 accrued early")
+	}
+	for _, record := range l.Journal() {
+		if record.Kind == ledger.Interest {
+			t.Fatal("interest capitalized before Day 6 closed")
+		}
+	}
+
+	l.Close()
+	before := l.Journal()
+	l.Close()
+	if !reflect.DeepEqual(before, l.Journal()) {
+		t.Fatal("repeated Close capitalized twice")
+	}
+
+	for _, tc := range []struct {
+		account string
+		basis   ledger.Money
+		daily   ledger.Money
+	}{
+		{"ACC-001", aed(12_50), aed(1)},
+		{"ACC-002", bhd(31_249), bhd(12)},
+	} {
+		total := ledger.Money{Currency: tc.basis.Currency}
+
+		for day := ledger.FirstDay; day <= ledger.LastDay; day++ {
+			if got := l.Accrued(tc.account, day); got != tc.daily {
+				t.Fatalf("%s Day %d accrual = %v, want %v",
+					tc.account, day, got, tc.daily)
+			}
+			total = total.Add(l.Accrued(tc.account, day))
+		}
+
+		count := 0
+		for _, record := range l.Journal() {
+			if record.Kind == ledger.Interest && record.AccountID == tc.account {
+				count++
+				if record.Day != 6 || record.ValueDay != 6 ||
+					record.Amount != total {
+					t.Fatalf("capitalization = %+v, daily sum = %v", record, total)
+				}
+				if l.Before(record.Seq).Balance(tc.account, 6) != tc.basis {
+					t.Fatal("interest affected its own basis")
+				}
+			}
+		}
+
+		if count != 1 || l.Balance(tc.account, 6) != tc.basis.Add(total) ||
+			l.AtClose(6).Balance(tc.account, 6) != tc.basis.Add(total) {
+			t.Fatalf("%s: capitalization did not reconcile", tc.account)
+		}
+	}
+}
+
+func TestBackdatedInterestAdjustmentsAreAppendedAndNotRepeated(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+	)
+
+	correction := accountEvent("late-debit", 3, ledger.Debit, aed(50_00))
+	correction.ValueDay = 1
+	applyEvents(t, l, correction)
+
+	for _, day := range []ledger.Day{1, 2} {
+		if l.AtClose(day).Accrued("ACC-001", day) != aed(4) ||
+			l.Accrued("ACC-001", day) != aed(2) {
+			t.Fatalf("Day %d original and restated accruals are wrong", day)
+		}
+
+		count := 0
+		for _, record := range l.Journal() {
+			if record.Kind == ledger.Accrual &&
+				record.EventID == correction.ID && record.ValueDay == day {
+				count++
+				if record.Amount != aed(-2) || record.Day != 3 {
+					t.Fatalf("adjustment = %+v", record)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("Day %d: %d adjustments, want 1", day, count)
+		}
+	}
+
+	before := l.Journal()
+	hold := accountEvent("reserve", 3, ledger.Authorization, aed(1))
+	hold.AuthID = "purchase"
+	applyEvents(t, l, hold)
+
+	if !reflect.DeepEqual(l.Journal()[:len(before)], before) {
+		t.Fatal("reassessment rewrote earlier records")
+	}
+	for _, record := range l.Journal()[len(before):] {
+		if record.Kind == ledger.Accrual {
+			t.Fatal("unchanged ledger balance accrued twice")
+		}
+	}
+	if l.Balance("ACC-001", 3) != aed(50_00) {
+		t.Fatal("accrual adjustment changed ledger money")
+	}
+}
+
+func TestInterestCorrectionsUseBalancesAfterRetainedFees(t *testing.T) {
+	l := newTestLedger(t)
+	applyEvents(t, l,
+		accountEvent("fund", 1, ledger.Credit, aed(100_00)),
+	)
+
+	late := accountEvent("late-debit", 3, ledger.Debit, aed(150_00))
+	late.ValueDay = 1
+	applyEvents(t, l, late)
+
+	for _, day := range []ledger.Day{1, 2} {
+		if l.AtClose(day).Accrued("ACC-001", day) != aed(4) ||
+			l.Accrued("ACC-001", day) != aed(0) {
+			t.Fatalf("negative Day %d kept positive interest", day)
+		}
+	}
+
+	applyEvents(t, l, ledger.Event{
+		ID: "refund", BookedDay: 3, ValueDay: 1,
+		Kind: ledger.Reversal, AccountID: "ACC-001",
+		Reverses: late.ID,
+	})
+
+	// Retained fees leave Day 1 at 75.00 and Day 2 at 50.00.
+	if l.Accrued("ACC-001", 1) != aed(3) ||
+		l.Accrued("ACC-001", 2) != aed(2) {
+		t.Fatal("interest ignored retained fees")
+	}
+}
+
+func TestZeroAccrualProducesNoCapitalization(t *testing.T) {
+	l := newTestLedger(t)
+	l.Close()
+
+	for _, record := range l.Journal() {
+		if record.Kind == ledger.Accrual || record.Kind == ledger.Interest {
+			t.Fatalf("zero balance generated interest: %+v", record)
+		}
 	}
 }
