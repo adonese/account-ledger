@@ -1,5 +1,5 @@
 
-.PHONY: lint fmt
+.PHONY: lint fmt bench
 
 lint:
 	golangci-lint config verify
@@ -7,3 +7,7 @@ lint:
 
 fmt:
 	golangci-lint fmt
+
+# Reproduces the scaling table in DESIGN.md, section 1.
+bench:
+	cmd/bench/run.sh
