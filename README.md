@@ -114,7 +114,8 @@ prints one line per build:
   and why, and approaches abandoned along the way.
 - [AMBIGUITIES.md](AMBIGUITIES.md): where the brief allows more than one
   reading, the reading taken, and known defects.
-- [NUMBERS.md](NUMBERS.md): every constant, and why not half of it.
+- [NUMBERS.md](NUMBERS.md): fixed inputs, derived values, and reasons for
+  chosen constants.
 - [DESIGN.md](DESIGN.md): scale, value dating in a UAE bank, how
   authorizations end, and what was cut.
 - [WORKLOG.md](WORKLOG.md): what was done, and when.
